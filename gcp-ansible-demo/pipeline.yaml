@@ -1,0 +1,118 @@
+# examples/gcp-ansible-demo/pipeline.yaml (COMPLETO con todos los componentes) 
+# Pipeline configuration
+
+name: "gcp-ansible-webserver-prod"
+timeout: "30m"
+max_retries: 2
+environment:
+  GOOGLE_PROJECT_ID: "${GOOGLE_PROJECT_ID}"
+  ENVIRONMENT: "production"
+
+steps:
+  # === FASE 1: INICIALIZACIÓN ===
+  - name: "inicio-pipeline"
+    type: "noop"
+    config:
+      message: "🚀 Iniciando pipeline de infraestructura GCP + Ansible con Policy-as-Code"
+
+  # === FASE 2: TERRAFORM (Infraestructura) ===
+  - name: "terraform-init"
+    type: "terraform"
+    action: "init"
+    working_dir: "./terraform"
+
+  - name: "terraform-plan"
+    type: "terraform"
+    action: "plan"
+    working_dir: "./terraform"
+    config:
+      output: "infra.tfplan"
+
+  # === FASE 3: POLICY-AS-CODE (OPA) ===
+  - name: "policy-compliance-check"
+    type: "policy-check"
+    config:
+      policy_file: "./policies/terraform.rego"
+      input_type: "terraform-plan-json"
+      working_dir: "./terraform"
+      plan_file: "infra.tfplan"
+      json_output: "reports/infra.tfplan.json"
+    when: "success"
+
+  # === FASE 4: APLICACIÓN DE INFRAESTRUCTURA ===
+  - name: "terraform-apply"
+    type: "terraform"
+    action: "apply"
+    working_dir: "./terraform"
+    config:
+      plan_file: "infra.tfplan"
+    rollback:
+      action: "destroy"
+    when: "success"
+
+  # === FASE 5: ESPERA Y VERIFICACIÓN ===
+  - name: "esperar-provisionamiento"
+    type: "wait"
+    config:
+      duration: "90s"
+    when: "success"
+
+  - name: "verificar-instancia-gcp"
+    type: "gcp-verify"
+    config:
+      project_id: "${GOOGLE_PROJECT_ID}"
+      zone: "us-central1-a"
+      instance_name: "webserver-01"
+    when: "success"
+
+  # === FASE 6: CONFIGURATION MANAGEMENT (Ansible) ===
+  - name: "ansible-provision"
+    type: "ansible"
+    working_dir: "./ansible"
+    config:
+      playbook: "site.yml"
+      inventory: "inventory.ini"
+      limit: "webservers"
+    when: "success"
+
+  # === FASE 7: PRUEBAS DE INFRAESTRUCTURA ===
+  - name: "test-conectividad-tcp"
+    type: "infrastructure-test"
+    config:
+      type: "tcp"
+      host: "${OUTPUT.instance_ip}"
+      port: 22
+      timeout: "30s"
+    when: "success"
+
+  - name: "test-http-healthcheck"
+    type: "infrastructure-test"
+    config:
+      type: "http"
+      endpoint: "http://${OUTPUT.instance_ip}"
+      expected_status: 200
+      timeout: "45s"
+    when: "success"
+
+  # === FASE 8: NOTIFICACIONES Y FINALIZACIÓN ===
+  - name: "notificacion-exito"
+    type: "notification"
+    config:
+      type: "console"
+      prefix: "✅ ÉXITO"
+      message: "Pipeline '${pipeline.name}' completado exitosamente en ${duration}s. IP: ${OUTPUT.instance_ip}"
+    when: "success"
+
+  - name: "notificacion-fallo"
+    type: "notification"
+    config:
+      type: "console"
+      prefix: "❌ FALLO"
+      message: "Pipeline '${pipeline.name}' fallido en paso '${failed_step}'"
+    when: "failure"
+
+  - name: "pipeline-completado"
+    type: "noop"
+    config:
+      message: "✅ ¡Pipeline completado! Reporte disponible en: reports/pipeline-report.json"
+    when: "success"
